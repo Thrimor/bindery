@@ -1661,15 +1661,19 @@ func (s *Scanner) tryImportInternal(ctx context.Context, dl *models.Download, do
 			return
 		}
 		destDir := UniqueDir(audiobookDest)
-		// Set by the plain whole-folder placement branch below when it
-		// merges into the book's existing shared folder (#1959), so the
-		// skips it declined to overwrite can be surfaced on the import's
-		// History entry and notification rather than only in a log line.
+		// A computed destination occupied by this same book's ebook is not a
+		// collision with another book. Remember it up front so every audiobook
+		// placement shape can converge on the shared folder; some shapes stage
+		// first because their rollback assumes a fresh directory.
+		sharedDestDir := ""
+		if existingDir, merging := s.existingEbookDir(ctx, book); merging && filepath.Clean(audiobookDest) == existingDir {
+			sharedDestDir = existingDir
+		}
+		// Files a merge declined to overwrite are surfaced on History and the
+		// import notification rather than disappearing into a log line.
 		var mergeSkippedFiles []string
-		// Whether the placement below merged into the book's own existing
-		// folder rather than a folder of its own. Consulted by the
-		// post-placement rollback, which must not treat a shared folder as
-		// this import's to delete.
+		// Whether the final destination is the book's pre-existing shared folder.
+		// Rollback must never remove that folder wholesale.
 		var mergedIntoExistingFolder bool
 		// Choose hardlink-vs-copy (when auto) against the audiobook root the
 		// files actually land under, not s.libraryDir — they can be on
@@ -1704,6 +1708,15 @@ func (s *Scanner) tryImportInternal(ctx context.Context, dl *models.Download, do
 			// cue sheets that the dir walk would have grabbed, but is safer
 			// than moving the shared download root.
 			//
+			// In a shared ebook/audiobook layout the destination may already
+			// exist because this same book's ebook created it. Per-file placement
+			// is safe to merge directly: it tracks exactly which basenames it
+			// creates, so rollback removes only those files, never the ebook.
+			if sharedDestDir != "" {
+				destDir = sharedDestDir
+				mergedIntoExistingFolder = true
+			}
+			//
 			// Collision preflight first (#2275): flattening by basename can
 			// give two files from different source directories the same
 			// destination, and the placement calls below would then lose one
@@ -1726,7 +1739,14 @@ func (s *Scanner) tryImportInternal(ctx context.Context, dl *models.Download, do
 				// removes them through an os.Root opened on destDir.
 				placed := make([]string, 0, len(bookFiles))
 				for _, srcFile := range bookFiles {
-					dstFile := filepath.Join(destDir, filepath.Base(srcFile))
+					name := filepath.Base(srcFile)
+					dstFile := filepath.Join(destDir, name)
+					if mergedIntoExistingFolder {
+						if _, statErr := os.Stat(dstFile); statErr == nil {
+							mergeSkippedFiles = append(mergeSkippedFiles, name)
+							continue
+						}
+					}
 					var fileErr error
 					switch mode {
 					case "hardlink":
@@ -1794,7 +1814,19 @@ func (s *Scanner) tryImportInternal(ctx context.Context, dl *models.Download, do
 					}
 					slog.Info("renaming audiobook files per template", "src", audiobookSource, "dst", destDir, "mode", flattenMode, "template", tmpl)
 					dirErr = flattenAudiobookDirNamed(importCtx, flattenMode, audiobookSource, destDir, namer)
-					if dirErr == nil && mode == "move" && importCtx.Err() == nil {
+					if dirErr == nil && sharedDestDir != "" {
+						stagedDir := destDir
+						mergeSkippedFiles, dirErr = MoveDirMergeCtx(importCtx, stagedDir, sharedDestDir)
+						if dirErr == nil {
+							// Any skipped staging files still have their originals in
+							// audiobookSource: flatten never consumes the source. The
+							// staging folder is therefore safe to discard.
+							_ = os.RemoveAll(stagedDir)
+							destDir = sharedDestDir
+							mergedIntoExistingFolder = true
+						}
+					}
+					if dirErr == nil && mode == "move" && importCtx.Err() == nil && len(mergeSkippedFiles) == 0 {
 						if rmErr := os.RemoveAll(audiobookSource); rmErr != nil {
 							slog.Warn("could not remove source after move-mode audiobook rename", "src", audiobookSource, "error", rmErr)
 						}
@@ -1820,33 +1852,28 @@ func (s *Scanner) tryImportInternal(ctx context.Context, dl *models.Download, do
 					}
 					slog.Info("flattening multi-disc audiobook", "src", audiobookSource, "dst", destDir, "mode", flattenMode)
 					dirErr = flattenAudiobookDir(importCtx, flattenMode, audiobookSource, destDir)
-					if dirErr == nil && mode == "move" && importCtx.Err() == nil {
+					if dirErr == nil && sharedDestDir != "" {
+						stagedDir := destDir
+						mergeSkippedFiles, dirErr = MoveDirMergeCtx(importCtx, stagedDir, sharedDestDir)
+						if dirErr == nil {
+							_ = os.RemoveAll(stagedDir)
+							destDir = sharedDestDir
+							mergedIntoExistingFolder = true
+						}
+					}
+					if dirErr == nil && mode == "move" && importCtx.Err() == nil && len(mergeSkippedFiles) == 0 {
 						if rmErr := os.RemoveAll(audiobookSource); rmErr != nil {
 							slog.Warn("flatten: could not remove source after move-mode flatten", "src", audiobookSource, "error", rmErr)
 						}
 					}
-				} else if existingDir, merging := s.existingEbookDir(ctx, book); merging && filepath.Clean(audiobookDest) == existingDir {
+				} else if sharedDestDir != "" {
 					// Shared-folder layout (#1959): this book's ebook already
 					// occupies exactly the folder the audiobook destination
 					// resolves to, so the collision UniqueDir disambiguated
 					// above is this same book, not an unrelated one. Merge
 					// into that folder instead, undoing the " (2)" suffix.
 					//
-					// Deliberately not extended to the flatten paths above,
-					// though the single-file branch below shares it (#2686).
-					// The flatten paths cannot take a pre-existing destDir:
-					// they document and rely on having created it themselves,
-					// and remove it wholesale (os.RemoveAll) to roll back any
-					// error, which against a shared folder would delete the
-					// ebook sitting in it. They keep the historical UniqueDir
-					// behaviour, so a library using an audiobook naming
-					// template or multi-disc flattening still splits into
-					// "Title (2)" until flatten's rollback is reworked to only
-					// remove what it placed. The per-file placement branch
-					// (usePerFile) keeps it for the same reason: it flattens
-					// several sources by basename into one folder, so a merge
-					// there needs a per-file collision story of its own.
-					destDir = existingDir
+					destDir = sharedDestDir
 					mergedIntoExistingFolder = true
 					slog.Info("merging audiobook into the book's existing shared folder",
 						"title", book.Title, "bookID", book.ID, "dst", destDir, "mode", mode)
@@ -1883,8 +1910,8 @@ func (s *Scanner) tryImportInternal(ctx context.Context, dl *models.Download, do
 				// needs to own destDir: it places exactly one named file and
 				// rolls back exactly that name, so merging into a folder that
 				// already holds this book's ebook is safe.
-				if existingDir, merging := s.existingEbookDir(ctx, book); merging && filepath.Clean(audiobookDest) == existingDir {
-					destDir = existingDir
+				if sharedDestDir != "" {
+					destDir = sharedDestDir
 					mergedIntoExistingFolder = true
 					slog.Info("merging audiobook file into the book's existing shared folder",
 						"title", book.Title, "bookID", book.ID, "dst", destDir, "mode", mode)
