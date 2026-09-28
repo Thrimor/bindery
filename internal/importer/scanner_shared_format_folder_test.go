@@ -2,8 +2,8 @@ package importer
 
 import (
 	"context"
-	"fmt"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -762,8 +762,12 @@ func TestTryImportInternal_SharedFolderVariantsDoNotDependOnImportOrder(t *testi
 				a := filepath.Join(root, "Part A", "01.mp3")
 				b := filepath.Join(root, "Part B", "02.mp3")
 				for p, body := range map[string]string{a: "a", b: "b"} {
-					if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil { t.Fatal(err) }
-					if err := os.WriteFile(p, []byte(body), 0o644); err != nil { t.Fatal(err) }
+					if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+						t.Fatal(err)
+					}
 				}
 				return root, []string{a, b}
 			},
@@ -773,12 +777,13 @@ func TestTryImportInternal_SharedFolderVariantsDoNotDependOnImportOrder(t *testi
 			setup: func(t *testing.T, _ *Scanner, settings *db.SettingsRepo, root string) (string, []string) {
 				t.Helper()
 				if err := settings.Set(context.Background(), "naming.audiobook_file_template", "{Title} - Part {Part:3}.{ext}"); err != nil {
-					// Older registry spelling used by this branch.
-					if err := settings.Set(context.Background(), "naming.audiobook_file_template", "{Title} - Part {Part:3}.{ext}"); err != nil { t.Fatal(err) }
+					t.Fatal(err)
 				}
 				for i := 1; i <= 2; i++ {
 					p := filepath.Join(root, fmt.Sprintf("%02d.mp3", i))
-					if err := os.WriteFile(p, []byte("audio"), 0o644); err != nil { t.Fatal(err) }
+					if err := os.WriteFile(p, []byte("audio"), 0o644); err != nil {
+						t.Fatal(err)
+					}
 				}
 				return root, nil
 			},
@@ -787,11 +792,17 @@ func TestTryImportInternal_SharedFolderVariantsDoNotDependOnImportOrder(t *testi
 			name: "multi-disc flatten",
 			setup: func(t *testing.T, _ *Scanner, settings *db.SettingsRepo, root string) (string, []string) {
 				t.Helper()
-				if err := settings.Set(context.Background(), "import.audiobook.flatten_multi_disc", "true"); err != nil { t.Fatal(err) }
+				if err := settings.Set(context.Background(), "import.audiobook.flatten_multi_disc", "true"); err != nil {
+					t.Fatal(err)
+				}
 				for _, rel := range []string{filepath.Join("Disc 1", "01.mp3"), filepath.Join("Disc 2", "01.mp3")} {
 					p := filepath.Join(root, rel)
-					if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil { t.Fatal(err) }
-					if err := os.WriteFile(p, []byte("audio"), 0o644); err != nil { t.Fatal(err) }
+					if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(p, []byte("audio"), 0o644); err != nil {
+						t.Fatal(err)
+					}
 				}
 				return root, nil
 			},
@@ -803,39 +814,70 @@ func TestTryImportInternal_SharedFolderVariantsDoNotDependOnImportOrder(t *testi
 			t.Run(tc.name+"/"+mode, func(t *testing.T) {
 				sharedDir := t.TempDir()
 				s, book, dlRepo, bookRepo, settings, _, ctx := sharedFormatFixture(t, sharedDir)
-				if err := settings.Set(ctx, "import.mode", mode); err != nil { t.Fatal(err) }
+				if err := settings.Set(ctx, "import.mode", mode); err != nil {
+					t.Fatal(err)
+				}
 
-				// Ebook first: this is the order that used to trigger " (2)".
 				ebookRoot := t.TempDir()
-				if err := os.WriteFile(filepath.Join(ebookRoot, "book.epub"), []byte("epub"), 0o644); err != nil { t.Fatal(err) }
-				ebookDL := &models.Download{GUID: "ebook-" + t.Name(), Title: book.Title, BookID: &book.ID, Status: models.StateCompleted}
-				if err := dlRepo.Create(ctx, ebookDL); err != nil { t.Fatal(err) }
+				if err := os.WriteFile(filepath.Join(ebookRoot, "book.epub"), []byte("epub"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				ebookDL := &models.Download{
+					GUID:   "ebook-" + t.Name(),
+					Title:  book.Title,
+					BookID: &book.ID,
+					Status: models.StateCompleted,
+				}
+				if err := dlRepo.Create(ctx, ebookDL); err != nil {
+					t.Fatal(err)
+				}
 				s.tryImportInternal(ctx, ebookDL, ebookRoot, "", "", "", nil, nil)
 
 				files, err := bookRepo.ListFiles(ctx, book.ID)
-				if err != nil { t.Fatal(err) }
+				if err != nil {
+					t.Fatal(err)
+				}
 				var ebookDir string
 				for _, f := range files {
-					if f.Format == models.MediaTypeEbook { ebookDir = filepath.Dir(f.Path) }
+					if f.Format == models.MediaTypeEbook {
+						ebookDir = filepath.Dir(f.Path)
+					}
 				}
-				if ebookDir == "" { t.Fatal("ebook did not import") }
+				if ebookDir == "" {
+					t.Fatal("ebook did not import")
+				}
 
 				audioRoot := t.TempDir()
 				source, explicit := tc.setup(t, s, settings, audioRoot)
-				audioDL := &models.Download{GUID: "audio-" + t.Name(), Title: book.Title + " [MP3]", BookID: &book.ID, Status: models.StateCompleted, Quality: "mp3"}
-				if err := dlRepo.Create(ctx, audioDL); err != nil { t.Fatal(err) }
+				audioDL := &models.Download{
+					GUID:    "audio-" + t.Name(),
+					Title:   book.Title + " [MP3]",
+					BookID:  &book.ID,
+					Status:  models.StateCompleted,
+					Quality: "mp3",
+				}
+				if err := dlRepo.Create(ctx, audioDL); err != nil {
+					t.Fatal(err)
+				}
 				s.tryImportInternal(ctx, audioDL, source, "", "", "", nil, explicit)
 
 				got, err := dlRepo.GetByGUID(ctx, audioDL.GUID)
-				if err != nil { t.Fatal(err) }
+				if err != nil {
+					t.Fatal(err)
+				}
 				if got.Status != models.StateImported {
 					t.Fatalf("audiobook status = %q, want imported (error: %s)", got.Status, got.ErrorMessage)
 				}
+
 				files, err = bookRepo.ListFiles(ctx, book.ID)
-				if err != nil { t.Fatal(err) }
+				if err != nil {
+					t.Fatal(err)
+				}
 				var audioDir string
 				for _, f := range files {
-					if f.Format == models.MediaTypeAudiobook { audioDir = f.Path }
+					if f.Format == models.MediaTypeAudiobook {
+						audioDir = f.Path
+					}
 				}
 				if audioDir != ebookDir {
 					t.Fatalf("audiobook dir = %q, ebook dir = %q; import order split the book", audioDir, ebookDir)
